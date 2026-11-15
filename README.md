@@ -34,7 +34,8 @@ DSH（DeepSeek Harness）Web 增强插件：**把你在意的对话钉成一份�
 ```
 
 - 拖动标题栏可以把它摆在任何地方，位置记在浏览器里，下次打开还在原处；
-- 蓝点表示那个会话正在跑；你现在正待着的那个会话整行高亮；
+- 状态点和侧栏是同一套：**等待审批 / 等待回答 / 计划待审 → 橙点**，进行中 → 蓝点，完成未读 → 绿点，空闲不点；行尾也会写出状态词（「待审批」等），时间仍然保留；
+- 你现在正待着的那个会话整行高亮；
 - 鼠标移到某一行，右侧出现 ✕，把它从清单里拿掉；
 - 点任意一行 → 切到那个会话（跨工作区一步到位，不用先展开工作区分组）。
 
@@ -54,6 +55,7 @@ DSH（DeepSeek Harness）Web 增强插件：**把你在意的对话钉成一份�
 - **不自动收集。** 清单里有什么，完全是你点进来的。没有「最近访问」这类自动累积 —— 那是另一个产品，混在一起只会让这份清单失去「我挑的」这个意义。
 - **不碰原生的置顶。** 原生「置顶会话」是把会话顶到它自己工作区分组的头上；这份清单是跨工作区的，两件事互不干扰。
 - **不复制任何原生状态。** 清单本身只有一份（插件的 store），会话标题 / 是否在跑 / 属于哪个工作区都是每次渲染时从 `ctx.sessions.list` 和 `ctx.workspaces.list` 现读的。会话改名、归档、被删掉，清单里跟着变，不需要同步。
+- **状态判定抄自侧栏，不自己发明。** 判定顺序与 `ui-workspace` 的 `sessionStatuses` 一致：等待用户介入 > 正在运行 > 完成未读 > 空闲。正在等你审批的会话往往 `running` 是 false（智能体停下来等人），只认 running 就会把它画成灰色的空闲点。
 
 ### 实现取向
 
@@ -62,6 +64,7 @@ DSH（DeepSeek Harness）Web 增强插件：**把你在意的对话钉成一份�
 | 卡片挂哪 | `shell.overlay` —— 框架级浮动层，位于所有列之上、滚动容器之外，天然点击穿透，条目自行选择是否接收指针事件 |
 | 星标挂哪 | 没有槽位可用，所以插进侧栏 `_sectionHeader` / `_headerActions` 的 DOM 契约里，**借用同排原生按钮的 class**，颜色尺寸 hover 全跟着原生走 |
 | 跳转 | `ctx.uiWorkspace.openSession(id)` —— 选中会话 + 显示对话一步完成，跨工作区不需要先展开分组 |
+| 会话状态 | `ctx.uiSession.sessionStatus`（`ui-session` 的根状态源，侧栏也读它）；状态点直接渲染原生 `primitives.StateDot`，于是「橙 = 等待审批/等待回答」这类颜色永远和侧栏同源，DSH 换配色也跟着换 |
 | 当前会话 | `ctx.sessions.list` 里该行的 `retainedBy.mainView > 0`（ui-session 自己判定「当前会话」用的就是这个字段） |
 | 拖动手感 | 拖动期间只改 `transform`（合成层内移动，不触发重排、不读写布局），松手时才把位移折进 `left/top` 并存盘 |
 | 拖动不断触 | 卡片与星标都带稳定 key；拖动期间任何重渲染都不会替换正在被拖的那个节点 |
@@ -125,19 +128,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1           # 真�
 
 A DSH (DeepSeek Harness) web enhancement: **pin the sessions you care about into one cross-workspace list and jump to any of them in one click.**
 
-Star a session in the sidebar, and it joins the care list. The star that lives in the Workspace header row opens a draggable card listing every cared session with its workspace, relative time and running state — click one and you are there, no matter which workspace it lives in.
+Star a session in the sidebar, and it joins the care list. The star that lives in the Workspace header row opens a draggable card listing every cared session with its workspace, relative time and live status — click one and you are there, no matter which workspace it lives in.
 
 > Browser-only: no host routes, nothing written outside the browser's localStorage.
 
 ### Behaviour
 
 - **Collapsed**: one star in the Workspace section header row, beside search / view options / add workspace / W. A badge shows how many sessions are cared for.
-- **Expanded**: a floating card — draggable by its title bar, position remembered, current session highlighted, a blue dot for a running session, ✕ on hover to remove a row, click a row to open it.
+- **Expanded**: a floating card — draggable by its title bar, position remembered, current session highlighted, ✕ on hover to remove a row, click a row to open it.
+- **Status dots match the sidebar**: waiting-for-approval / waiting-for-an-answer / plan-awaiting-review → **orange**, running → blue, unread completion → green, idle → none. The status word ("Waiting for approval") joins the row's meta line; the relative time stays.
 - **Adding**: the ☆ button in a session row's hover strip, or the session's "…" menu.
 
 ### Design stance
 
 Nothing is duplicated from the native UI. The list itself is the plugin's only state (one store, persisted to localStorage); titles, running state, workspace membership and the current session are read from `ctx.sessions.list` / `ctx.workspaces.list` on every render, and opening a session goes through `ctx.uiWorkspace.openSession(id)`.
+
+Session status comes from `ctx.uiSession.sessionStatus` (the same root source the sidebar reads) and the dot *is* the shipped `primitives.StateDot`, so "orange means waiting for you" can never drift from the sidebar. The precedence is copied from `ui-workspace`'s `sessionStatuses`: pending interaction > running > unread completion > idle — a session waiting for your approval is usually *not* running, so reading `running` alone would paint it as idle.
 
 The card lives in `shell.overlay` (the frame-wide floating layer). The star has no slot to live in, so it is injected into the sidebar's `_sectionHeader` / `_headerActions` DOM contract and **borrows the class of a native button in the same row** — colours, size and hover come from the shipped stylesheet. When that row cannot fit another button (the 56px icon rail), the star yields and falls back to a small floating button so the native controls are never pushed out.
 

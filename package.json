@@ -1,6 +1,6 @@
 {
   "name": "dsh-care-sessions",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A draggable care list of hand-picked sessions across workspaces in the DSH web UI: star a session in the sidebar, then jump to it from a floating card (or from the star that lives in the Workspace header row)",
   "type": "module",
   "main": "index.js",

@@ -55,7 +55,11 @@ window.__ModuleLoader__.load({
 			"action.remove": "移出最关心对话",
 			"menu.add": "加入最关心对话",
 			"menu.remove": "移出最关心对话",
-			"state.running": "进行中",
+			"status.waitingApproval": "待审批",
+			"status.planReview": "计划待审",
+			"status.waitingAnswer": "待回答",
+			"status.running": "进行中",
+			"status.completed": "已完成",
 			"state.archived": "已归档",
 			"state.gone": "已不在会话列表",
 			"workspace.unknown": "未分组",
@@ -80,7 +84,11 @@ window.__ModuleLoader__.load({
 			"action.remove": "Remove from the care list",
 			"menu.add": "Add to the care list",
 			"menu.remove": "Remove from the care list",
-			"state.running": "Running",
+			"status.waitingApproval": "Waiting for approval",
+			"status.planReview": "Plan awaiting review",
+			"status.waitingAnswer": "Waiting for an answer",
+			"status.running": "Running",
+			"status.completed": "Completed",
 			"state.archived": "Archived",
 			"state.gone": "No longer in the session list",
 			"workspace.unknown": "Ungrouped",
@@ -143,8 +151,16 @@ window.__ModuleLoader__.load({
 			".dcs-row{display:flex;align-items:center;gap:8px;padding:6px 6px 6px 8px;border-radius:8px;cursor:pointer;}",
 			".dcs-row:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.06));}",
 			".dcs-row[data-current='true']{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08));}",
-			".dcs-dot{width:6px;height:6px;border-radius:50%;flex:none;background:var(--dsw-alias-border-l2,rgba(255,255,255,.22));}",
-			".dcs-dot[data-run='true']{background:var(--dsw-alias-state-business-primary,#3b82f6);box-shadow:0 0 0 3px rgba(59,130,246,.16);}",
+			/* 状态点：优先用原生 primitives 的 StateDot（颜色自然与侧栏一致）。
+			   万一那个导出不在，就用下面这套按原生 token 上色的备用点——
+			   warning 用 warn-primary，正是侧栏「待审批/待回答」的那个橙。 */
+			".dcs-dot-slot{width:8px;display:inline-flex;align-items:center;justify-content:center;flex:none;}",
+			".dcs-dot{width:6px;height:6px;border-radius:50%;flex:none;background:var(--dsw-alias-label-tertiary,#adb2b8);}",
+			".dcs-dot[data-state='ongoing']{background:var(--dsw-alias-state-business-primary,#3b82f6);}",
+			".dcs-dot[data-state='warning']{background:var(--dsw-alias-state-warn-primary,#e8a33d);}",
+			".dcs-dot[data-state='done']{background:var(--dsw-alias-state-success-primary,#22c55e);}",
+			".dcs-dot[data-state='error']{background:var(--dsw-alias-state-error-primary,#ef4444);}",
+			".dcs-dot-idle{visibility:hidden;}",
 			".dcs-row-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px;}",
 			".dcs-row-title{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}",
 			".dcs-row-meta{color:var(--dsw-alias-label-tertiary,#adb2b8);font-size:10.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}",
@@ -162,6 +178,24 @@ window.__ModuleLoader__.load({
 		].join("\n");
 
 		/* ---- 小工具 ---- */
+
+		/**
+		 * 状态点。优先借原生 `primitives.StateDot` —— 侧栏行首那个点就是它，
+		 * 于是「进行中=蓝、等待审批/等待回答=橙」这一套颜色永远和侧栏同源，
+		 * 不必在这里抄任何色值，DSH 换配色也跟着换。
+		 *
+		 * 那个导出万一不在了，就退回自己按原生 token 上色的点
+		 * （`--dsw-alias-state-warn-primary` 正是那个橙）。
+		 * 空闲不给点（与侧栏一致），槽位宽度留着，行与行仍然对齐。
+		 *
+		 * @param state - 'warning' | 'ongoing' | 'done' | 'error' | 'idle'
+		 */
+		function StatusDot({ state }) {
+			if (state === "idle") return null;
+			const Dot = primitives.StateDot;
+			if (Dot !== undefined && Dot !== null) return React.createElement(Dot, { state });
+			return React.createElement("span", { className: "dcs-dot", "data-state": state });
+		}
 
 		/** 手绘五角星：内置图标集里没有星形，这一枚自己画，描边粗细对齐同排图标。 */
 		function StarIcon({ size = 16, filled = false }) {
@@ -417,15 +451,51 @@ window.__ModuleLoader__.load({
 		/* ---- 从目录里解出要显示的行 ---- */
 
 		/**
-		 * 把「最关心」的 id 列表和当前会话目录、工作区目录合起来，得到渲染要用的行。
+		 * 等待用户介入的三种情况，与 ui-workspace 的 `visiblePendingKind` 同集。
+		 * 它们都是 `warning` 态 —— 也就是侧栏行首那个橙点（token `--dsw-alias-state-warn-primary`）。
+		 */
+		const PENDING_STATUS = {
+			approval: "status.waitingApproval",
+			"plan-review": "status.planReview",
+			question: "status.waitingAnswer"
+		};
+
+		/**
+		 * 一个会话该显示成什么状态。判定顺序抄自 ui-workspace 的 `sessionStatuses`：
+		 * **等待用户介入 > 正在运行 > 完成未读 > 空闲**。
+		 *
+		 * 这里必须自己算一遍而不是只看 `summary.running`：正在等你审批的会话往往
+		 * `running` 是 false（智能体停下来等人），只认 running 就会把它画成空闲的灰点 ——
+		 * 而侧栏此刻画的是橙点。颜色由 `state` 决定，交给原生 StateDot 上色。
+		 *
+		 * @param status - ctx.uiSession.sessionStatus 里这一条的 SessionStatus
+		 * @param summary - ctx.sessions.list 里这一行的摘要（status 缺失时兜底）
+		 * @param t - 翻译函数
+		 * @returns `{ state, label }`；空闲时 label 为 null
+		 */
+		function rowStatus(status, summary, t) {
+			const pending = status === undefined || status === null ? undefined : PENDING_STATUS[status.pendingInteraction?.kind];
+			if (pending !== undefined) return { state: "warning", label: t(pending) };
+			/* 状态快照里有这一条就以它为准；还没有基线时退回目录里的 running */
+			const running = status === undefined || status === null ? summary !== undefined && summary.running === true : status.running === true;
+			if (running) return { state: "ongoing", label: t("status.running") };
+			if (status !== undefined && status !== null && status.completionUnread === true) {
+				return { state: "done", label: t("status.completed") };
+			}
+			return { state: "idle", label: null };
+		}
+
+		/**
+		 * 把「最关心」的 id 列表和当前会话目录、工作区目录、会话状态合起来，得到渲染要用的行。
 		 * 目录里查不到时退回加入时缓存的标题，并如实标成「已归档」或「已不在会话列表」。
 		 *
 		 * @param items - 存储里的条目（新在前）
 		 * @param sessions - ctx.sessions.list 快照
 		 * @param workspaces - ctx.workspaces.list 快照
+		 * @param statuses - ctx.uiSession.sessionStatus 快照（按会话 id 取状态）
 		 * @param t - 翻译函数
 		 */
-		function resolveRows(items, sessions, workspaces, t) {
+		function resolveRows(items, sessions, workspaces, statuses, t) {
 			const byId = sessions === undefined || sessions === null ? {} : sessions.byId ?? {};
 			const views = workspaces === undefined || workspaces === null ? [] : workspaces.items ?? [];
 			const archivedIds = workspaces === undefined || workspaces === null ? [] : workspaces.archivedSessionIds ?? [];
@@ -436,12 +506,16 @@ window.__ModuleLoader__.load({
 			const archived = new Set(archivedIds);
 			return items.map((item) => {
 				const summary = byId[item.id];
+				const status = statuses === undefined || statuses === null || typeof statuses.get !== "function" ? undefined : statuses.get(item.id);
+				const live = rowStatus(status, summary, t);
 				return {
 					id: item.id,
 					title: summary === undefined ? item.title || t("widget.untitled") : summary.displayTitle || item.title || t("widget.untitled"),
 					workspace: workspaceOf.get(item.id) ?? null,
 					at: (summary === undefined ? null : summary.updatedAt) ?? item.at,
-					running: summary !== undefined && summary.running === true,
+					running: live.state === "ongoing",
+					state: live.state,
+					statusLabel: live.label,
 					current: summary !== undefined && (summary.retainedBy?.mainView ?? 0) > 0,
 					archived: archived.has(item.id),
 					missing: summary === undefined
@@ -543,6 +617,8 @@ window.__ModuleLoader__.load({
 			const state = React.useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
 			const sessions = React.useSyncExternalStore(sources.sessions.subscribe, sources.sessions.getSnapshot, sources.sessions.getSnapshot);
 			const workspaces = React.useSyncExternalStore(sources.workspaces.subscribe, sources.workspaces.getSnapshot, sources.workspaces.getSnapshot);
+			/* 会话的实时状态（等待审批 / 等待回答 / 运行中 / 完成未读）——侧栏那个橙点就来自这里 */
+			const statuses = React.useSyncExternalStore(sources.statuses.subscribe, sources.statuses.getSnapshot, sources.statuses.getSnapshot);
 			const info = React.useSyncExternalStore(seat.subscribe, seat.getSnapshot, seat.getSnapshot);
 
 			/* 相对时间要自己往前走，否则「刚刚」会一直停在刚刚 */
@@ -646,7 +722,7 @@ window.__ModuleLoader__.load({
 				store.setPos({ left: Math.round(rect.left), top: Math.round(rect.top) });
 			};
 
-			const rows = resolveRows(state.items, sessions, workspaces, t);
+			const rows = resolveRows(state.items, sessions, workspaces, statuses, t);
 
 			const header = React.createElement(
 				"div",
@@ -705,7 +781,8 @@ window.__ModuleLoader__.load({
 							rows.map((row) => {
 								const meta = [row.missing ? (row.archived ? t("state.archived") : t("state.gone")) : row.workspace ?? t("workspace.unknown")];
 								if (row.archived && !row.missing) meta.push(t("state.archived"));
-								if (row.running) meta.push(t("state.running"));
+								/* 与侧栏一致：等待审批 / 等待回答 / 进行中 / 已完成 写在行尾，时间仍然保留 */
+								if (row.statusLabel !== null) meta.push(row.statusLabel);
 								const time = relativeTime(row.at, t);
 								if (time !== "") meta.push(time);
 								return React.createElement(
@@ -714,10 +791,15 @@ window.__ModuleLoader__.load({
 										key: row.id,
 										className: `dcs-row${row.missing ? " dcs-row-gone" : ""}`,
 										"data-current": row.current ? "true" : "false",
-										title: t("widget.openTitle"),
+										"data-state": row.state,
+										title: row.title,
 										onClick: () => openSession(row.id)
 									},
-									React.createElement("span", { className: "dcs-dot", "data-run": row.running ? "true" : "false" }),
+									React.createElement(
+										"span",
+										{ className: "dcs-dot-slot" },
+										React.createElement(StatusDot, { state: row.state })
+									),
 									React.createElement(
 										"span",
 										{ className: "dcs-row-text" },
@@ -778,7 +860,7 @@ window.__ModuleLoader__.load({
 			const store = createStore();
 			const t = ctx.locale.bind(NS);
 
-			/* 四个订阅面：都在 Client 根的整个生命周期里稳定，可以放心交给 useSyncExternalStore */
+			/* 五个订阅面：都在 Client 根的整个生命周期里稳定，可以放心交给 useSyncExternalStore */
 			const sources = {
 				sessions: {
 					subscribe: (listener) => ctx.sessions.list.subscribe(listener),
@@ -787,6 +869,11 @@ window.__ModuleLoader__.load({
 				workspaces: {
 					subscribe: (listener) => ctx.workspaces.list.subscribe(listener),
 					getSnapshot: () => ctx.workspaces.list.getSnapshot()
+				},
+				/* 会话的实时状态：等待审批 / 等待回答 / 运行中 / 完成未读。侧栏那个橙点同源。 */
+				statuses: {
+					subscribe: (listener) => ctx.uiSession.sessionStatus.subscribe(listener),
+					getSnapshot: () => ctx.uiSession.sessionStatus.getSnapshot()
 				}
 			};
 
@@ -912,9 +999,10 @@ window.__ModuleLoader__.load({
 		 *   locale       中英文词典
 		 *   sessions     会话目录（标题 / 活跃时间 / 是否当前会话）
 		 *   workspaces   会话属于哪个工作区、是否已归档
+		 *   uiSession    会话的实时状态（等待审批 / 等待回答 / 运行中 / 完成未读）
 		 *   uiWorkspace  点一下跳过去（选中会话 + 显示对话，跨工作区一步到位）
 		 */
-		exports.inject = ["slots", "locale", "sessions", "workspaces", "uiWorkspace"];
+		exports.inject = ["slots", "locale", "sessions", "workspaces", "uiSession", "uiWorkspace"];
 		return module.exports;
 	}
 });
